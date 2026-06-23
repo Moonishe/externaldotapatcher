@@ -17,6 +17,7 @@
 #include "autoaccept.hpp"
 
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <csignal>
 #include <atomic>
@@ -131,6 +132,19 @@ static bool init_all() {
     return true;
 }
 
+static std::string colored_autoaccept_mode() {
+    auto s = autoaccept_mode_str();
+    auto m = autoaccept_get_mode();
+    std::ostringstream oss;
+    if (m == AutoAcceptMode::Normal)
+        oss << dye::green(s);
+    else if (m == AutoAcceptMode::DotaPlus)
+        oss << dye::yellow(s);
+    else
+        oss << dye::red(s);
+    return oss.str();
+}
+
 // ── Menu ───────────────────────────────────────────────────────
 static void show_menu() {
     std::cout << dye::aqua_on_blue("  Dota 2 External Patcher  ") << "\n"
@@ -142,7 +156,7 @@ static void show_menu() {
               << " [4] " << dye::black_on_yellow("[!]") << " Particles in FOW   " << (is_particles_on() ? dye::light_green("On") : dye::light_red("Off")) << "\n"
               << " [5] " << dye::black_on_yellow("[!]") << " Weather            " << "(id: " << g.current_weather_id << ", 0=default, 1..9=other)\n"
               << " [6] " << dye::black_on_yellow("[!]") << " Dota Plus          " << (is_dota_plus_on() ? dye::light_green("On") : dye::light_red("Off")) << "\n"
-              << " [7] " << dye::black_on_yellow("[!]") << " Auto-Accept        " << autoaccept_mode_str() << "\n"
+              << " [7] " << dye::black_on_yellow("[!]") << " Auto-Accept        " << colored_autoaccept_mode() << "\n"
               << " [0] Exit\n\n"
               << "=> ";
 }
@@ -286,8 +300,8 @@ int main() {
                 autoaccept_set_mode(AutoAcceptMode::DotaPlus);
             else
                 autoaccept_set_mode(AutoAcceptMode::Off);
-            std::cout << dye::green("[+] Auto-Accept: ") << autoaccept_mode_str() << "\n";
-            std::cout << "    Normal:  (960, 540)  RGB(10,80,40)\n";
+            std::cout << dye::green("[+] Auto-Accept: ") << colored_autoaccept_mode() << "\n";
+            std::cout << "    Normal:  (960, 540)  white text\n";
             std::cout << "    Dota+:   (979, 381)  RGB(134,219,138)\n";
             Sleep(800);
             break;

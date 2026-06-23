@@ -52,8 +52,22 @@ namespace {
         if (!fg) return false;
         wchar_t title[256]{};
         GetWindowTextW(fg, title, 256);
-        // Dota 2 window title usually contains "Dota 2"
-        return wcsstr(title, L"Dota 2") != nullptr;
+        if (wcsstr(title, L"Dota 2") != nullptr)
+            return true;
+        // Fallback: check process name of the foreground window
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        if (!pid) return false;
+        HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (!h) return false;
+        wchar_t path[MAX_PATH]{};
+        DWORD size = MAX_PATH;
+        QueryFullProcessImageNameW(h, 0, path, &size);
+        CloseHandle(h);
+        wchar_t* name = wcsrchr(path, L'\\');
+        if (name) ++name;
+        else name = path;
+        return _wcsicmp(name, L"dota2.exe") == 0;
     }
 
     bool color_matches(COLORREF c1, COLORREF c2, int tolerance) {
