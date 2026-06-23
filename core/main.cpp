@@ -1,300 +1,307 @@
+//
+// main.cpp — Dota 2 External Patcher
+// Raw WinAPI, no BlackBone dependency.
+//
+// Features:
+//   [1] Camera distance
+//   [2] Patch ZFar (fog controller)
+//   [3] Fog toggle
+//   [4] Particles in FOW
+//   [5] Weather change
+//   [6] Dota Plus unlock
+//   [0] Exit
+//
+
 #include "color.hpp"
 #include "dota_sdk.hpp"
+#include "autoaccept.hpp"
 
-__int64 __fastcall GetBaseEntity(blackbone::ProcessMemory& a0, uintptr_t a1, int a2)
-{
-	__int64 v2; // rcx
-	uintptr_t v3; // rcx
+#include <iostream>
+#include <string>
+#include <csignal>
+#include <atomic>
+#include <cstdint>
+#include <windows.h>
+#include <tlhelp32.h>
 
-	if ((unsigned int)a2 <= 0x7FFE
-		&& (unsigned int)(a2 >> 9) <= 0x3F)
-	{
-		auto hui2 = (v2 = *a0.Read<__int64>(a1 + 8i64 * (a2 >> 9) + 16));
-		if (hui2 != 0) {
-			auto hui = (v3 = (120i64 * (a2 & 0x1FF) + v2));
-			if (hui != 0i64) {
-				return *a0.Read<__int64>(v3);
-			}
-		}
-	}
-	else
-	{
-		return 0i64;
-	}
+// ── Process finder ─────────────────────────────────────────────
+static DWORD find_pid(const wchar_t* name) {
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    DWORD pid = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (wcscmp(pe.szExeFile, name) == 0) {
+                pid = pe.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return pid;
 }
 
-const char* GetEntityName(blackbone::ProcessMemory& mem, uint64_t ident) {
-	char* buf = (char*)malloc(0x40);
-	memset(buf, 0x0, 0x40);
-
-	auto m_name = mem.Read<uint64_t>(ident + 0x18);
-	if (m_name.success() && *m_name)
-		mem.Read(*m_name, 0x40, buf);
-
-	auto m_designerName = mem.Read<uint64_t>(ident + 0x20);
-	if (m_designerName.success() && *m_designerName)
-		mem.Read(*m_designerName, 0x40, buf);
-
-	return buf;
-};
-
-
-[[nodiscard]] inline static int req_action(byte w) {
-	if (w == 0) {
-		int act1;
-		std::cout << dye::aqua_on_blue("Dota 2 External Patcher") << "\n["
-			<< dye::light_aqua("https://github.com/tranqu1lizer/") << "]\n["
-			<< dye::light_aqua("https://yougame.biz/threads/288873")
-			<< "]\n\n";
-		std::cout << dye::black_on_yellow("Warning: [!] - use at own risk")
-			<< "\n\n[1] Change camera distance\n"
-			<< "[2] Patch ZFar\n"
-			<< "[3] Toggle Fog\n"
-			<< "[4] " << dye::black_on_yellow("[!]") << " Toggle particles\n"
-			<< "[5] " << dye::black_on_yellow("[!]") << " Unlock/lock emoticon\n"
-			<< "[6] " << dye::black_on_yellow("[!]") << " Change weather(partially) "
-			//<< "\n[7] " << dye::black_on_yellow("[!]") << " VBE "
-			<< "\n=> ";
-		std::cin >> act1;
-		return act1;
-	}
-	else if (w == 1) {
-		int dist;
-		std::system("cls");
-		std::cout << "=> ";
-		std::cin >> dist;
-
-		return dist;
-	}
-	else if (w == 2) {
-		int value;
-
-		std::system("cls");
-		std::cout << "Weather number(0-9, 0 = restore default)\n=> ";
-		std::cin >> value;
-
-		return value;
-	}
+// ── Dota Plus toggle ──────────────────────────────────────────
+static void toggle_dota_plus(uintptr_t addr) {
+    if (!addr) return;
+    uint8_t first = Memory::read<uint8_t>(addr).value_or(0);
+    if (first == 0x48) {
+        // sub rsp, 38h -> mov al, 1; ret
+        Memory::patch(addr, "B0 01 C3");
+        std::cout << "[+] Dota Plus ON\n";
+    } else if (first == 0xB0) {
+        // restore prologue: 48 83 EC (4th byte 38 still intact)
+        Memory::patch(addr, "48 83 EC");
+        std::cout << "[+] Dota Plus OFF\n";
+    } else {
+        std::cout << "[unknown dota_plus bytes at " << std::hex << addr << "]\n";
+    }
 }
 
-void toggle_fog_farz(blackbone::ProcessMemory& mem, uint64_t ppGameEntitySystem,bool isfarz = false) {
+// ── Cached scan results ────────────────────────────────────────
+#include "context.hpp"
+Context g;
 
-
-	uint64_t pGameEntitySystem = *mem.Read<uint64_t>(ppGameEntitySystem);
-	uint64_t identity = *mem.Read<uint64_t>(pGameEntitySystem + 0x210);
-
-	int highestIndex = *mem.Read<int>(pGameEntitySystem + 0x2100);
-
-	for (int i = 0; i <= highestIndex; ++i) {
-		uint64_t ent = GetBaseEntity(mem, pGameEntitySystem, i);
-		if (!ent)
-			continue;
-
-		uint64_t identity = *mem.Read<uint64_t>(ent + 0x10);
-
-		const char* name = GetEntityName(mem,identity);
-		//printf_s("%p %s\n", ent, name);
-
-		if (strcmp(name, "env_fog_controller") == 0) {
-			uint64_t ent = *mem.Read<uint64_t>(identity);
-
-			uintptr_t fogparams = ent + 0x5E0;
-			bool enabled = *mem.Read<uint8_t>(fogparams + 0x64);
-
-			// !!!! РАБОТАЕТ!!!
-			if (isfarz) {
-				mem.Write<float>(fogparams + 0x2c, 18000.f);
-			}
-			else {
-				mem.Write(fogparams + 0x64, !enabled);
-			}
-		}
-
-		free((void*)name);
-	}
+static bool is_particles_on() {
+    if (!g.particles_addr) return false;
+    return Memory::read<uint8_t>(g.particles_addr + 1).value_or(0) == 0x85;
+}
+static bool is_dota_plus_on() {
+    if (!g.dota_plus_addr) return false;
+    return Memory::read<uint8_t>(g.dota_plus_addr).value_or(0) == 0xB0;
 }
 
-//void ccvars(blackbone::ProcessMemory& mem, uint64_t ICVar) {
-//	struct ConCommand {
-//	public:
-//		char* m_name{}; // 0x0
-//		char* m_description{}; // 0x8
-//		std::int32_t m_flags{}; // 0x10
-//	private:
-//		std::int32_t unk0{}; // 0x14
-//	public:
-//		void* m_member_accessor_ptr{}; // 0x18
-//		void* m_callback{}; // 0x20
-//	private:
-//		void* unk1{}; // 0x28
-//		void* unk2{}; // 0x30
-//	};
-//
-//	uint16_t commands_size = *mem.Read<uint16_t>(ICVar + 0xF0);
-//
-//	for (int i = 0; i < commands_size; i++) {
-//		/*ConCommand current_cvar;
-//		mem.Read(*mem.Read<uint64_t>((ICVar + 0xd8) + (i * sizeof(ConCommand))), sizeof(ConCommand), &current_cvar);*/
-//
-//		char buf[256];
-//		auto a = *mem.Read<uint64_t>(*mem.Read<uint64_t>((ICVar + 0xd8))) + (i * sizeof(ConCommand));
-//		mem.Read(a, 256, buf);
-//
-//		std::cout << buf << '\n' << '\n';
-//	}
-//}
+// ── Initialize: scan all patterns once ─────────────────────────
+static bool init_all() {
+    if (g.init) return true;
 
-void change_weather(blackbone::ProcessMemory& mem, blackbone::ModuleDataPtr& client, uint64_t weather) {
-	BYTE GetWeatherType_enter_bytes = *mem.Read<BYTE>(weather);
-	BYTE BytePatch[6] = { 0xB8,0xcc, 0x00,0x00,0x00, // mov eax, ...
-									  0xC3 };		 // ret
-	BytePatch[1] = (BYTE)req_action(2);
+    g.camera          = Scanner::find_camera();
+    g.entity_system   = Scanner::find_entity_system();
+    g.particles_addr  = Scanner::find_particles_addr();
+    g.particles_fix   = Scanner::find_particles_fix_addr();
+    g.weather_addr    = Scanner::find_weather_addr();
+    g.dota_plus_addr  = Scanner::find_proto_account_plus();
 
-	if (BytePatch[1] != 0) {
-		mem.Write(weather, sizeof(BytePatch), BytePatch);
+    if (g.weather_addr) {
+        auto first = Memory::read<uint8_t>(g.weather_addr).value_or(0);
+        if (first == 0xB8)
+            g.current_weather_id = Memory::read<uint8_t>(g.weather_addr + 1).value_or(0);
+        else
+            g.current_weather_id = 0;
+    }
 
-		//GetLocalPlayer(mem, client);
-	}
-	else if (GetWeatherType_enter_bytes == 0xb8) {
-		// push rbx
-		// sub rsp, 20
-		mem.Write(weather, 6, "\x40\x53\x48\x83\xEC\x20");
-	}
+    g.init = true;
+
+    // Report what was found
+    if (g.camera.valid())
+        std::cout << dye::green("  [+] Camera found\n");
+    else
+        std::cout << "  [-] Camera not found\n";
+
+    if (g.entity_system)
+        std::cout << dye::green("  [+] Entity system found\n");
+    else
+        std::cout << "  [-] Entity system not found\n";
+
+    {
+        auto pit = Memory::modules.find("particles.dll");
+        if (pit != Memory::modules.end()) {
+            std::cout << "  [i] particles.dll: 0x" << std::hex << pit->second.start
+                      << " - 0x" << pit->second.end << " (size " << std::dec << pit->second.size << ")\n";
+            std::wcout << "      path: " << pit->second.path << "\n";
+        }
+        if (g.particles_addr)
+            std::cout << dye::green("  [+] Particles pattern found at 0x") << std::hex << g.particles_addr << "\n";
+        else
+            std::cout << "  [-] Particles pattern not found\n";
+    }
+
+    if (g.weather_addr)
+        std::cout << dye::green("  [+] Weather pattern found\n");
+    else
+        std::cout << "  [-] Weather pattern not found\n";
+
+    if (g.dota_plus_addr)
+        std::cout << dye::green("  [+] Dota Plus pattern found\n");
+    else
+        std::cout << "  [-] Dota Plus pattern not found\n";
+
+    return true;
 }
 
-void process(blackbone::Process& dota_proc,
-	blackbone::ProcessMemory& DOTAMemory) {
-	static auto client = dota_proc.modules().GetModule(L"client.dll");
-
-	auto DOTACamera = FindCamera(dota_proc);
-
-	// EB, 0E | jmp client.7FF9A7BBCFFA
-	constexpr const char* bytePatch = "\xEB\x0E";
-	// 75, 0E | jne client.7FF9A7BBCFFA
-	constexpr const char* byteRestore = "\x75\x0E";
-
-	static uint64_t particles_addr = 0;
-	static uint64_t emoticon_addr = 0;
-	static uint64_t icvar_addr = 0;
-	static uint64_t weather_addr = 0;
-	uint64_t insn_bytes = 0, insn_bytes2 = 0, insn_bytes3 = 0;
-	static uint64_t ppGameEntitySystem = 0;
-
-	static bool first = true;
-	if (first) {
-		std::vector<blackbone::ptr_t> search_result, search_result2;
-
-		blackbone::PatternSearch and_al_01{ "\x4C\x8B\xDC\x55\x56\x41\x54" };
-		and_al_01.SearchRemote(
-			dota_proc, 0xCC,
-			dota_proc.modules().GetModule(L"particles.dll").get()->baseAddress,
-			dota_proc.modules().GetModule(L"particles.dll").get()->size,
-			search_result, 1
-		);
-
-		if (search_result.empty()) {
-			std::cout << "cant find particles pattern\n";
-			getchar();
-			exit(1);
-		}
-
-		particles_addr = search_result.front() + 0x2c;
-
-		search_result.clear();
-
-		blackbone::PatternSearch game_ent_sys{ "\x48\x8B\x0D\xCC\xCC\xCC\xCC\x33\xD2\xE8\xCC\xCC\xCC\xCC" };
-		game_ent_sys.SearchRemote(dota_proc, 0xcc, client->baseAddress, client->size, search_result, 1);
-
-		ppGameEntitySystem = DOTAMemory.GetAbsoluteAddress(search_result.front());
-
-		search_result.clear();
-
-		//56 57 48 83 EC ? 33 FF 8B F2
-		blackbone::PatternSearch is_emoticon_unlocked{ "\x56\x57\x48\x83\xEC\xCC\x33\xFF\x8B\xF2" };
-		is_emoticon_unlocked.SearchRemote(dota_proc, 0xcc, client->baseAddress, client->size, search_result, 1);
-
-		emoticon_addr = search_result.front() - 0x6;
-
-		search_result.clear();
-		//48 8B 0D ? ? ? ? 4C 8D 44 24 ? 4C 8B 0D ? ? ? ? 48 8D 94 24 - ICVar
-		//\xE9\x00\x00\x00\x00\x33\xC0\x48\x83\xC4\x00\x5B\xC3\xCC\xCC\xCC\xCC\xCC\xCC\x33\xC0 xadadxxxxx?xxxxxxxxxx - weather
-		blackbone::PatternSearch weather_pattern{ "\x48\x8B\xD9\xBA\xad\xad\xad\xad\x48\x8D\x0D\xad\xad\xad\xad\xE8\xad\xad\xad\xad\x48\x85\xC0\x75\xad\x48\x8B\x05\xad\xad\xad\xad\x48\x8B\x40\xad\x83\x38\xad\x74\xad\xBA\xad\xad\xad\xad\x48\x8D\x0D\xad\xad\xad\xad\xE8\xad\xad\xad\xad\x48\x85\xC0\x75\xad\x48\x8B\x05\xad\xad\xad\xad\x48\x8B\x40\xad\x8B\x00" };
-		weather_pattern.SearchRemote(dota_proc, 0xad, client->baseAddress,
-			client->size, search_result, 1);
-
-		weather_addr = search_result.front() - 0x6;
-
-		first = false;
-	}
-
-	if (DOTACamera.IsValid()) {
-		const auto act = req_action(0);
-
-		switch (act) {
-		case 1:
-			DOTACamera.SetDistance(req_action(1));
-			break;
-		case 2:
-			toggle_fog_farz(DOTAMemory, ppGameEntitySystem, true);
-			break;
-		case 3:
-			toggle_fog_farz(DOTAMemory, ppGameEntitySystem);
-			//DOTACamera.SetFarZ(18000.f);
-
-			//DOTACamera.ToggleFog();
-			break;
-		case 4:
-			insn_bytes2 = DOTAMemory.Read<USHORT>(particles_addr).result();
-			if (insn_bytes2 == 0x08b41) {
-				DOTAMemory.Write(particles_addr, 3, "\xb2\x01\x90");
-			}
-			else if (insn_bytes2 == 0x01b2) {
-				DOTAMemory.Write(particles_addr, 3, "\x41\x8B\xED");
-			}
-			else {
-				std::cout << "[unknown bytes at " << std::hex << particles_addr << '\n';
-				std::system("pause");
-				exit(1);
-			}
-			break;
-		case 5:
-			insn_bytes3 = *DOTAMemory.Read<uint64_t>(emoticon_addr);
-			//std::cout << insn_bytes3 << '\n';
-			if (insn_bytes3 == 0x5756c390909001b0) {
-				DOTAMemory.Write(emoticon_addr, 6, "\x48\x89\x5C\x24\x08\x55");
-			}
-			else if (insn_bytes3 == 0x57565508245c8948) {
-				DOTAMemory.Write(emoticon_addr, 6, "\xb0\x01\x90\x90\x90\xc3");
-			}
-			else {
-				std::cout << "[unknown bytes at " << std::hex << emoticon_addr << '\n';
-				std::system("pause");
-				exit(1);
-			}
-
-			break;
-		case 6:
-			change_weather(DOTAMemory, client, weather_addr);
-			break;
-		default:
-			exit(1);
-		}
-	}
-	std::system("cls");
+// ── Menu ───────────────────────────────────────────────────────
+static void show_menu() {
+    std::cout << dye::aqua_on_blue("  Dota 2 External Patcher  ") << "\n"
+              << "[" << dye::light_aqua("https://github.com/Moonishe/externaldotapatcher") << "]\n\n"
+              << dye::black_on_yellow("  [!] = may cause instability  ") << "\n\n"
+              << " [1] Camera distance\n"
+              << " [2] Patch ZFar (fog controller)\n"
+              << " [3] Fog              " << (g.fog_enabled ? dye::light_green("On") : dye::light_red("Off")) << "\n"
+              << " [4] " << dye::black_on_yellow("[!]") << " Particles in FOW   " << (is_particles_on() ? dye::light_green("On") : dye::light_red("Off")) << "\n"
+              << " [5] " << dye::black_on_yellow("[!]") << " Weather            " << "(id: " << g.current_weather_id << ", 0=default, 1..9=other)\n"
+              << " [6] " << dye::black_on_yellow("[!]") << " Dota Plus          " << (is_dota_plus_on() ? dye::light_green("On") : dye::light_red("Off")) << "\n"
+              << " [7] " << dye::black_on_yellow("[!]") << " Auto-Accept        " << autoaccept_mode_str() << "\n"
+              << " [0] Exit\n\n"
+              << "=> ";
 }
 
+// ── Main ───────────────────────────────────────────────────────
 int main() {
-	blackbone::Process dota;
-	if (NT_SUCCESS(dota.Attach(L"dota2.exe")) &&
-		dota.modules().GetModule(L"client.dll")) {
-		std::cout << dye::green("Attached to dota2.exe\n") << std::endl;
-		while (1)
-			process(dota, dota.memory());
-	}
-	else {
-		std::cout << dye::black_on_red("dota2.exe not found or not client.dll")
-			<< std::endl;
-		std::system("pause");
-		exit(1);
-	}
+    std::cout << "Looking for dota2.exe...\n";
+    DWORD pid = find_pid(L"dota2.exe");
+    if (!pid) {
+        std::cout << dye::black_on_red("dota2.exe not found. Is the game running?") << "\n";
+        system("pause");
+        return 1;
+    }
+
+    if (!Memory::open(pid)) {
+        std::cout << dye::black_on_red("OpenProcess failed. Run as administrator.") << "\n";
+        system("pause");
+        return 1;
+    }
+
+    std::cout << "Loading modules...\n";
+    if (!Memory::load_modules(pid)) {
+        std::cout << dye::black_on_red("Failed to load modules.") << "\n";
+        system("pause");
+        return 1;
+    }
+
+    auto client = Memory::pattern_scan("client.dll", "48 8B 0D");  // quick existence check
+    if (!client) {
+        std::cout << dye::black_on_red("client.dll not accessible.") << "\n";
+        system("pause");
+        return 1;
+    }
+
+    std::cout << dye::green("Attached to dota2.exe (PID: ") << pid << ")\n";
+    std::cout << "Scanning patterns...\n\n";
+    init_all();
+    autoaccept_init();
+
+    std::cout << "\nPress any key to continue...";
+    system("pause >nul");
+    system("cls");
+
+    while (true) {
+        show_menu();
+
+        int choice;
+        if (!(std::cin >> choice)) {
+            std::cin.clear();
+            std::cin.ignore(10000, '\n');
+            continue;
+        }
+
+        system("cls");
+
+        switch (choice) {
+        case 0:
+            goto exit;
+
+        case 1: {
+            if (!g.camera.valid()) {
+                std::cout << dye::black_on_red("Camera not available\n");
+                system("pause");
+                break;
+            }
+            std::cout << "Current distance: " << g.camera.get_distance() << "\n";
+            std::cout << "Enter new distance (default ~1200, max ~5000)\n=> ";
+            float dist;
+            std::cin >> dist;
+            g.camera.set_distance(dist);
+            std::cout << dye::green("[+] Camera distance set to ") << dist << "\n";
+            Sleep(800);
+            break;
+        }
+
+        case 2:
+            if (!g.entity_system) {
+                std::cout << dye::black_on_red("Entity system not available\n");
+                system("pause");
+                break;
+            }
+            toggle_fog_farz(g.entity_system, true);
+            system("pause");
+            break;
+
+        case 3:
+            if (!g.entity_system) {
+                std::cout << dye::black_on_red("Entity system not available\n");
+                system("pause");
+                break;
+            }
+            g.fog_enabled = toggle_fog_farz(g.entity_system, false);
+            system("pause");
+            break;
+
+        case 4:
+            if (!g.particles_addr) {
+                std::cout << dye::black_on_red("Particles pattern not found\n");
+                system("pause");
+                break;
+            }
+            toggle_particles(g.particles_addr);
+            if (g.particles_fix)
+                toggle_particles_fix(g.particles_fix);
+            system("pause");
+            break;
+
+        case 5: {
+            if (!g.weather_addr) {
+                std::cout << dye::black_on_red("Weather pattern not found\n");
+                system("pause");
+                break;
+            }
+            std::cout << "Current weather id: " << g.current_weather_id << "\n";
+            std::cout << "Available: 0 = default, 1 = rain, 2 = snow, 3 = ash, 4 = moon, 5 = rainstorm, 6 = custom1, 7 = custom2, 8 = custom3, 9 = custom4\n";
+            std::cout << "Enter weather number (0-9)\n=> ";
+            int w;
+            std::cin >> w;
+            change_weather(g.weather_addr, w);
+            g.current_weather_id = w;
+            std::cout << dye::green("[+] Weather set to id ") << w << "\n";
+            system("pause");
+            break;
+        }
+
+        case 6:
+            if (!g.dota_plus_addr) {
+                std::cout << dye::black_on_red("Dota Plus pattern not found\n");
+                system("pause");
+                break;
+            }
+            toggle_dota_plus(g.dota_plus_addr);
+            system("pause");
+            break;
+
+        case 7: {
+            auto mode = autoaccept_get_mode();
+            if (mode == AutoAcceptMode::Off)
+                autoaccept_set_mode(AutoAcceptMode::Normal);
+            else if (mode == AutoAcceptMode::Normal)
+                autoaccept_set_mode(AutoAcceptMode::DotaPlus);
+            else
+                autoaccept_set_mode(AutoAcceptMode::Off);
+            std::cout << dye::green("[+] Auto-Accept: ") << autoaccept_mode_str() << "\n";
+            std::cout << "    Normal:  (960, 540)  RGB(10,80,40)\n";
+            std::cout << "    Dota+:   (979, 381)  RGB(134,219,138)\n";
+            Sleep(800);
+            break;
+        }
+
+        default:
+            break;
+        }
+
+        system("cls");
+    }
+
+exit:
+    autoaccept_shutdown();
+    Memory::close();
+    return 0;
 }

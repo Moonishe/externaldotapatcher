@@ -1,183 +1,244 @@
-#include <BlackBone/Asm/AsmFactory.h>
-#include <BlackBone/Asm/AsmHelper64.h>
-#include <BlackBone/Asm/IAsmHelper.h>
-#include <BlackBone/Patterns/PatternSearch.h>
-#include <BlackBone/Process/Process.h>
-#include <BlackBone/Process/ProcessMemory.h>
-#include <BlackBone/Process/RPC/RemoteFunction.hpp>
-#include <BlackBone/Process/RPC/RemoteHook.h>
-#include <format>
-#include <iostream>
+#pragma once
 
-#pragma warning(disable : 6301)
+#include "memory.hpp"
+#include "patterns.hpp"
+#include <cstdint>
+#include <string>
 
-class DefClass {
+class CDOTA_Camera {
 public:
-	blackbone::ProcessMemory* memory;
-	std::uintptr_t baseAddr;
+    uintptr_t base = 0;
 
-	std::uintptr_t GetVF(unsigned short idx) noexcept {
-		const auto VMTAddr = memory->Read<std::uintptr_t>(baseAddr).result();
+    CDOTA_Camera() = default;
+    explicit CDOTA_Camera(uintptr_t b) : base(b) {}
 
-		return memory->Read<std::uintptr_t>(VMTAddr + idx * 8).result();
-	}
+    bool valid() const { return base != 0; }
 
-	bool IsValid() { return (memory && baseAddr) ? true : false; }
+    // Offsets from original external_patcher + dota2dumped
+    void set_distance(float d) { Memory::write<float>(base + 0x2E4, d); }
+    float get_distance() const { return Memory::read<float>(base + 0x270).value_or(0.0f); }
+
+    void set_farz(float f) { Memory::write<float>(base + 0x2A4, f); }
+    float get_farz() const { return Memory::read<float>(base + 0x2A4).value_or(0.0f); }
 };
 
-class CDOTA_Camera : public DefClass {
+class Scanner {
 public:
-	CDOTA_Camera() {
-		memory = nullptr;
-		baseAddr = NULL;
-	}
+    static CDOTA_Camera find_camera() {
+        auto addr = Memory::pattern_scan("client.dll", sig::cdota_camera);
+        if (!addr)
+            return {};
+        // +10 points to the lea instruction inside the pattern, then resolve rip-relative
+        auto manager = Memory::absolute_address(addr.value() + 10, 3, 7);
+        if (!manager)
+            return {};
+        auto camera = Memory::read<uintptr_t>(manager.value() + 0x20);
+        if (!camera)
+            return {};
+        return CDOTA_Camera(camera.value());
+    }
 
-	CDOTA_Camera(blackbone::ProcessMemory* memory, std::uintptr_t baseAddr) {
-		this->memory = memory;
-		this->baseAddr = baseAddr;
-	}
+    static uintptr_t find_entity_system() {
+        auto addr = Memory::pattern_scan("client.dll", sig::game_entity_system);
+        if (!addr)
+            return 0;
+        return Memory::absolute_address(addr.value(), 3, 7).value_or(0);
+    }
 
-	void SetDistance(float distance) {
-		memory->Write<float>(baseAddr + 0x2e4, distance);
-	}
+    static uintptr_t find_local_player() {
+        auto addr = Memory::pattern_scan("client.dll", sig::local_player_array);
+        if (!addr)
+            return 0;
+        return Memory::absolute_address(addr.value(), 3, 7).value_or(0);
+    }
 
-	void SetFOWAmount(float amount) {
-		memory->Write<float>(baseAddr + 0x70, amount);
-	}
+    static uintptr_t find_create_interface() {
+        return Memory::pattern_scan("client.dll", sig::create_interface).value_or(0);
+    }
 
-	void SetFarZ(float farz) {
-		memory->Write<float>(baseAddr + 0x2A4, farz);
-	}
+    static uintptr_t find_entity_list() {
+        auto addr = Memory::pattern_scan("client.dll", sig::entity_list);
+        if (!addr)
+            return 0;
+        return Memory::absolute_address(addr.value(), 3, 7).value_or(0);
+    }
 
-	auto GetDistance() {
-		return memory->Read<float>(baseAddr + 0x270).result();
-	}
+    static uintptr_t find_prepare_unit_orders() {
+        return Memory::pattern_scan("client.dll", sig::prepare_unit_orders).value_or(0);
+    }
 
-	auto GetFOWAmount() {
-		return memory->Read<float>(baseAddr + 0x70).result();
-	}
+    static uintptr_t find_execute_ui_command() {
+        return Memory::pattern_scan("client.dll", sig::execute_ui_command).value_or(0);
+    }
 
-	void ToggleFog() {
-		const auto aGetFog = this->GetVF(18);
-		const auto instructionBytes = memory->Read<uintptr_t>(aGetFog).result();
+    static uintptr_t find_play_panel_ptr() {
+        auto addr = Memory::pattern_scan("client.dll", sig::play_panel_ptr);
+        if (!addr)
+            return 0;
+        return Memory::absolute_address(addr.value(), 3, 7).value_or(0);
+    }
 
-		if (instructionBytes == 0x83485708245c8948) { // not patched
+    static uintptr_t find_accept_panel_ptr() {
+        auto addr = Memory::pattern_scan("client.dll", sig::accept_panel_ptr);
+        if (!addr)
+            return 0;
+        return Memory::absolute_address(addr.value(), 3, 7).value_or(0);
+    }
 
-			// 0x0F, 0x57, 0xC0 | xorps xmm0, xmm0
-			// 0xC3				| ret
-			constexpr const char* bytePatch = "\x0F\x57\xC0\xC3\x90\x90";
-			memory->Write(aGetFog, 6, bytePatch);
-			// std::cout << "Fog instructions patched" << std::endl;
-		}
-		else if (instructionBytes == 0x83489090C3C0570F) { // already patched
+    static uintptr_t find_proto_account_plus() {
+        return Memory::pattern_scan("client.dll", sig::get_proto_account_plus).value_or(0);
+    }
 
-			// 0x48, 0x89, 0x5C, 0x24, 0x08 | mov qword ptr ss:[rsp+8], rbx
-			// 0x57							| push rdi
-			constexpr const char* byteRestore = "\x48\x89\x5C\x24\x08\x57";
-			memory->Write(aGetFog, 6, byteRestore);
-			// std::cout << "Fog instructions restored" << std::endl;
-		}
-		else {
-			std::cout << "Error, unknown fog instructions: " << instructionBytes
-				<< std::endl;
-			std::system("pause");
-			exit(1);
-		}
-	}
+    static uintptr_t find_cgc_client_system() {
+        auto addr = Memory::pattern_scan("client.dll", sig::cgc_client_system);
+        if (!addr)
+            return 0;
+        return Memory::absolute_address(addr.value(), 3, 7).value_or(0);
+    }
 
-	void ToggleMaxZFar() {
-		const auto aGetZFar = this->GetVF(19);
-		const auto instructionBytes =
-			memory->Read<uintptr_t>(aGetZFar).result();
+    static uintptr_t find_send_message() {
+        return Memory::pattern_scan("client.dll", sig::send_message).value_or(0);
+    }
 
-		if (instructionBytes == 0x83485708245c8948) { // not patched
+    static uintptr_t find_particles_addr() {
+        return Memory::pattern_scan("particles.dll", sig::particles_rendering).value_or(0);
+    }
 
-			// 0xB8, 0x50, 0x46, 0x00, 0x00	| mov eax, 18000
-			// 0xF3, 0x0F, 0x2A, 0xC0		| cvtsi2ss xmm0, eax
-			// 0xC3							| ret
-			constexpr const char* bytePatch =
-				"\xB8\x50\x46\x00\x00\xF3\x0F\x2A\xC0\xC3";
-			memory->Write(aGetZFar, 10, bytePatch);
-			// std::cout << "ZFar instructions patched" << std::endl;
-		}
-		else if (instructionBytes == 0x2a0ff300004650b8) { // already patched
+    static uintptr_t find_particles_fix_addr() {
+        return Memory::pattern_scan("client.dll", sig::particles_rendering_fix).value_or(0);
+    }
 
-			// 0x48, 0x89, 0x5C, 0x24, 0x08 | mov qword ptr ss:[rsp+8], rbx
-			// 0x57							| push rdi
-			// 0x48, 0x83, 0xEC, 0x40       | sub rsp, 40
-			constexpr const char* byteRestore =
-				"\x48\x89\x5C\x24\x08\x57\x48\x83\xEC\x40";
-			memory->Write(aGetZFar, 10, byteRestore);
-			// std::cout << "ZFar instructions restored" << std::endl;
-		}
-		else {
-			std::cout << "Error, unknown ZFAR instructions: " << instructionBytes
-				<< std::endl;
-			std::system("pause");
-			exit(1);
-		}
-	}
+    static uintptr_t find_weather_addr() {
+        auto addr = Memory::pattern_scan("client.dll", sig::weather);
+        if (!addr)
+            return 0;
+        return addr.value() - 0x6;
+    }
 };
 
-uint64_t GetLocalPlayer(blackbone::ProcessMemory& memory, blackbone::ModuleDataPtr& client) {
-	std::vector<blackbone::ptr_t> search_result;
-
-	blackbone::PatternSearch LocalPlayerArray_insn{ "\x48\x8B\x05\xCC\xCC\xCC\xCC\x89\xBE" };
-	LocalPlayerArray_insn.SearchRemote(
-		*memory.process(), 0xCC,
-		client->baseAddress,
-		client->size,
-		search_result, 1
-	);
-
-	uint64_t localPlayer = *memory.Read<uint64_t>(memory.GetAbsoluteAddress(search_result.front(), 3, 7));
-
-	return localPlayer;
+static uintptr_t GetBaseEntity(uintptr_t entity_system, int idx) {
+    if (idx <= 0x7FFE && (idx >> 9) <= 0x3F) {
+        auto chunk = Memory::read<uintptr_t>(entity_system + 8 * (idx >> 9) + 16);
+        if (!chunk || !chunk.value())
+            return 0;
+        auto ent_ptr = chunk.value() + 120 * (idx & 0x1FF);
+        return Memory::read<uintptr_t>(ent_ptr).value_or(0);
+    }
+    return 0;
 }
 
-CDOTA_Camera FindCamera(blackbone::Process& proc) {
-	// std::vector<blackbone::ptr_t> search_result;
-	// typedef std::uintptr_t( __fastcall* CDOTACamera__Init )( );
-	// blackbone::PatternSearch aDOTACameraInit_Pattern{
-	// "\x48\x83\xEC\x38\xE8\xCC\xCC\xCC\xCC\x48\x85\xC0\x74\x4D" };
-	// aDOTACameraInit_Pattern.SearchRemote( proc, 0xCC, proc.modules(
-	// ).GetModule( L"client.dll" ).get( )->baseAddress, proc.modules(
-	// ).GetModule( L"client.dll" ).get( )->size, search_result, 1 );
-	// blackbone::RemoteFunction<CDOTACamera__Init> pFN( proc,
-	// search_result.front( ) );
+static std::string GetEntityName(uintptr_t ident) {
+    char buf[64] = {};
 
-	// if ( auto result = pFN.Call( ); result.success( ) && result.result( ) ) {
-	//	return CDOTA_Camera{ &proc.memory( ), result.result( ) };
-	// }
+    auto m_name = Memory::read<uintptr_t>(ident + 0x18);
+    if (m_name && m_name.value()) {
+        Memory::read_buffer(m_name.value(), buf, sizeof(buf) - 1);
+        if (buf[0])
+            return std::string(buf);
+    }
 
-	// return CDOTA_Camera{ nullptr, 0 };
+    auto m_designerName = Memory::read<uintptr_t>(ident + 0x20);
+    if (m_designerName && m_designerName.value()) {
+        Memory::read_buffer(m_designerName.value(), buf, sizeof(buf) - 1);
+        if (buf[0])
+            return std::string(buf);
+    }
 
-	static std::vector<blackbone::ptr_t> search_result;
-	static bool first_use = true;
-	if (first_use) {
-		blackbone::PatternSearch g_pDOTACameraManager_pattern{
-			"\x48\x89\x74\x24\x40\x48\x89\x7C\x24\x50\x48\x8D\x00\x00\x00\x00\x00\x48\x8B\x04\xC8\x8B\x04\x02\x39" };
-		g_pDOTACameraManager_pattern.SearchRemote(
-			proc, 0x00,
-			proc.modules().GetModule(L"client.dll").get()->baseAddress,
-			proc.modules().GetModule(L"client.dll").get()->size, search_result,
-			1);
-		first_use = false;
-	}
-
-	if (search_result.empty()) {
-		std::cout << "cant find dota camera\n";
-		getchar();
-		exit(1);
-	}
-
-	if (std::uintptr_t g_pDOTACameraManager =
-		proc.memory().GetAbsoluteAddress(search_result.front() + 10); g_pDOTACameraManager) {
-		auto dotaCamera = proc.memory().Read<std::uintptr_t>(g_pDOTACameraManager + 0x20);
-
-		if (dotaCamera.success() && dotaCamera.result())
-			return CDOTA_Camera{ &proc.memory(), dotaCamera.result() };
-	}
-
-	return CDOTA_Camera{ nullptr, 0 };
+    return "";
 }
+
+static bool toggle_fog_farz(uintptr_t ppGameEntitySystem, bool farz = false) {
+    auto pGameEntitySystem = Memory::read<uintptr_t>(ppGameEntitySystem).value_or(0);
+    if (!pGameEntitySystem) {
+        std::cout << "[fog] entity system pointer is null\n";
+        return false;
+    }
+
+    std::cout << "[fog] entity system = 0x" << std::hex << pGameEntitySystem << "\n";
+
+    auto first_identity = Memory::read<uintptr_t>(pGameEntitySystem + 0x210).value_or(0);
+    std::cout << "[fog] first_identity = 0x" << std::hex << first_identity << "\n";
+    if (!first_identity) {
+        std::cout << "[fog] first identity is null (wrong offset?)\n";
+        return false;
+    }
+
+    bool found = false;
+    int count = 0;
+    bool new_enabled = false;
+    for (auto ident = first_identity; ident && count < 20000; ident = Memory::read<uintptr_t>(ident + 0x58).value_or(0), ++count) {
+        auto name = GetEntityName(ident);
+        if (name == "env_fog_controller" || name == "C_FogController" || name == "fog_controller") {
+            auto fog = Memory::read<uintptr_t>(ident).value_or(0);
+            if (!fog)
+                continue;
+
+            found = true;
+            uintptr_t fogparams = fog + 0x5F0;
+            if (farz) {
+                Memory::write<float>(fogparams + 0x2c, 18000.0f);
+                std::cout << "[fog] set farz=18000 on " << name << " (fog=0x" << std::hex << fog << ")\n";
+            } else {
+                bool enabled = Memory::read<uint8_t>(fogparams + 0x64).value_or(0);
+                new_enabled = !enabled;
+                Memory::write<uint8_t>(fogparams + 0x64, new_enabled);
+                std::cout << "[+] Fog " << (new_enabled ? "ON" : "OFF") << "\n";
+            }
+        }
+    }
+
+    if (!found)
+        std::cout << "[fog] no fog controller entity found (scanned " << count << " identities)\n";
+
+    return farz ? found : new_enabled;
+}
+
+static void toggle_particles(uintptr_t particles_addr) {
+    if (!particles_addr)
+        return;
+    uint8_t b = Memory::read<uint8_t>(particles_addr + 1).value_or(0);
+    if (b == 0x84) {
+        Memory::patch(particles_addr + 1, { 0x85 });
+        std::cout << "[+] Particles in FOW ON\n";
+    } else if (b == 0x85) {
+        Memory::patch(particles_addr + 1, { 0x84 });
+        std::cout << "[+] Particles in FOW OFF\n";
+    } else {
+        std::cout << "[unknown particle bytes at " << std::hex << particles_addr << "+1]\n";
+    }
+}
+
+static void toggle_particles_fix(uintptr_t fix_addr) {
+    if (!fix_addr)
+        return;
+    uint8_t b = Memory::read<uint8_t>(fix_addr + 1).value_or(0);
+    if (b == 0x84)
+        Memory::patch(fix_addr + 1, { 0x85 });
+    else if (b == 0x85)
+        Memory::patch(fix_addr + 1, { 0x84 });
+}
+
+static void change_weather(uintptr_t weather_addr, int weather_id) {
+    if (!weather_addr)
+        return;
+
+    uint8_t first = Memory::read<uint8_t>(weather_addr).value_or(0);
+    uint8_t patch[6] = { 0xB8, static_cast<uint8_t>(weather_id), 0x00, 0x00, 0x00, 0xC3 };
+
+    if (weather_id != 0) {
+        Memory::patch(weather_addr, std::vector<uint8_t>(patch, patch + 6));
+    } else if (first == 0xB8) {
+        Memory::patch(weather_addr, "40 53 48 83 EC 20");
+    }
+}
+
+static void toggle_camera_farz(CDOTA_Camera& cam) {
+    if (!cam.valid())
+        return;
+    float farz = cam.get_farz();
+    if (farz < 10000.0f)
+        cam.set_farz(18000.0f);
+    else
+        cam.set_farz(1000.0f);
+}
+

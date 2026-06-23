@@ -1,0 +1,22 @@
+# Build outputs
+*.exe
+*.exe.manifest
+*.obj
+*.pdb
+*.ilk
+*.rar
+bin/
+
+# Local compiler toolchain
+tools/
+
+# IDE
+.vs/
+.vscode/settings.json
+.vscode/c_cpp_properties.json
+
+# CMake
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
