@@ -29,6 +29,7 @@ namespace {
     Config cfg_dotaplus;
 
     std::FILE* g_log = nullptr;
+    void (*g_redraw_callback)() = nullptr;
 
     Config load_normal() {
         // User-provided: normal queue
@@ -144,6 +145,8 @@ namespace {
                             std::fprintf(g_log, "[%lu] CLICK at (%d, %d)\n", GetTickCount(), cfg.text_x, cfg.text_y);
                             std::fflush(g_log);
                         }
+                        if (g_redraw_callback)
+                            g_redraw_callback();
                     }
                 }
             }
@@ -174,6 +177,10 @@ void autoaccept_shutdown() {
         std::fclose(g_log);
         g_log = nullptr;
     }
+}
+
+void autoaccept_set_redraw_callback(void (*callback)()) {
+    g_redraw_callback = callback;
 }
 
 void autoaccept_set_mode(AutoAcceptMode mode) {

@@ -161,6 +161,12 @@ static void show_menu() {
               << "=> ";
 }
 
+void redraw_menu() {
+    system("cls");
+    std::cout << dye::green("[+] Auto-Accept: game accepted! Mode reset to Off.\n\n");
+    show_menu();
+}
+
 // ── Main ───────────────────────────────────────────────────────
 int main() {
     std::cout << "Looking for dota2.exe...\n";
@@ -195,6 +201,7 @@ int main() {
     std::cout << "Scanning patterns...\n\n";
     init_all();
     autoaccept_init();
+    autoaccept_set_redraw_callback(redraw_menu);
 
     std::cout << "\nPress any key to continue...";
     system("pause >nul");

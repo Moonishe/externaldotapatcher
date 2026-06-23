@@ -10,3 +10,4 @@ void autoaccept_shutdown();
 void autoaccept_set_mode(AutoAcceptMode mode);
 AutoAcceptMode autoaccept_get_mode();
 std::string autoaccept_mode_str();
+void autoaccept_set_redraw_callback(void (*callback)());
