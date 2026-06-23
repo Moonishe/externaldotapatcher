@@ -137,11 +137,11 @@ static std::string colored_autoaccept_mode() {
     auto m = autoaccept_get_mode();
     std::ostringstream oss;
     if (m == AutoAcceptMode::Normal)
-        oss << dye::green(s);
+        oss << dye::light_green(s);
     else if (m == AutoAcceptMode::DotaPlus)
-        oss << dye::yellow(s);
+        oss << dye::light_yellow(s);
     else
-        oss << dye::red(s);
+        oss << dye::light_red(s);
     return oss.str();
 }
 

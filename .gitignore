@@ -5,6 +5,7 @@
 *.pdb
 *.ilk
 *.rar
+*.log
 bin/
 
 # Local compiler toolchain
