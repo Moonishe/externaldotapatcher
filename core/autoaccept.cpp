@@ -81,10 +81,11 @@ namespace {
     }
 
     bool check_text_region(HDC hdc, int x, int y, COLORREF color, int tolerance) {
-        // Check a 5x5 region around the target pixel.
-        // If any pixel matches the expected text color, treat the text as present.
-        for (int dy = -2; dy <= 2; ++dy) {
-            for (int dx = -2; dx <= 2; ++dx) {
+        // Check a 21x21 region around the target pixel.
+        // The Accept button text is slightly offset from the exact center pixel,
+        // so we search a wider area for the expected text color.
+        for (int dy = -10; dy <= 10; ++dy) {
+            for (int dx = -10; dx <= 10; ++dx) {
                 COLORREF pixel = GetPixel(hdc, x + dx, y + dy);
                 if (pixel != CLR_INVALID && color_matches(pixel, color, tolerance))
                     return true;
@@ -94,14 +95,15 @@ namespace {
     }
 
     void click_at(int x, int y) {
-        int screen_w = GetSystemMetrics(SM_CXSCREEN);
-        int screen_h = GetSystemMetrics(SM_CYSCREEN);
+        SetCursorPos(x, y);
+        Sleep(5);
 
         INPUT input = {};
         input.type = INPUT_MOUSE;
-        input.mi.dx = static_cast<LONG>(x * 65535LL / screen_w);
-        input.mi.dy = static_cast<LONG>(y * 65535LL / screen_h);
-        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP;
+        input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        SendInput(1, &input, sizeof(INPUT));
+        Sleep(20); // small hold so the game registers the click
+        input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
         SendInput(1, &input, sizeof(INPUT));
     }
 
