@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 
 namespace {
     struct Config {
@@ -27,12 +28,14 @@ namespace {
     Config cfg_normal;
     Config cfg_dotaplus;
 
+    std::FILE* g_log = nullptr;
+
     Config load_normal() {
         // User-provided: normal queue
         // Screenshot shows Russian "ПРИНЯТЬ" text is white on a dark green plate.
         return {
             960, 540, RGB(10, 80, 40), 35,
-            960, 540, RGB(255, 255, 255), 35
+            960, 540, RGB(255, 255, 255), 50
         };
     }
 
@@ -63,24 +66,17 @@ namespace {
         return std::abs(r1 - r2) + std::abs(g1 - g2) + std::abs(b1 - b2) <= tolerance;
     }
 
-    bool check_button_plate(HDC hdc, int text_x, int text_y, COLORREF color, int tolerance) {
-        // Check the 8 pixels surrounding the text pixel.
-        // If at least 5 of them match the plate color, we treat it as the button plate.
-        int matches = 0;
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                if (dx == 0 && dy == 0) continue;
-                COLORREF pixel = GetPixel(hdc, text_x + dx, text_y + dy);
+    bool check_text_region(HDC hdc, int x, int y, COLORREF color, int tolerance) {
+        // Check a 5x5 region around the target pixel.
+        // If any pixel matches the expected text color, treat the text as present.
+        for (int dy = -2; dy <= 2; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
+                COLORREF pixel = GetPixel(hdc, x + dx, y + dy);
                 if (pixel != CLR_INVALID && color_matches(pixel, color, tolerance))
-                    ++matches;
+                    return true;
             }
         }
-        return matches >= 5;
-    }
-
-    bool check_text_pixel(HDC hdc, int x, int y, COLORREF color, int tolerance) {
-        COLORREF pixel = GetPixel(hdc, x, y);
-        return pixel != CLR_INVALID && color_matches(pixel, color, tolerance);
+        return false;
     }
 
     void click_at(int x, int y) {
@@ -105,13 +101,33 @@ namespace {
                 const Config& cfg = (g_mode == AutoAcceptMode::DotaPlus) ? cfg_dotaplus : cfg_normal;
 
                 if (is_dota2_active()) {
-                    bool plate_ok = check_button_plate(hdc, cfg.plate_x, cfg.plate_y, cfg.plate_color, cfg.plate_tolerance);
-                    bool text_ok  = check_text_pixel(hdc, cfg.text_x, cfg.text_y, cfg.text_color, cfg.text_tolerance);
-                    if (plate_ok && text_ok) {
-                        click_at(cfg.plate_x, cfg.plate_y);
+                    bool text_ok = check_text_region(hdc, cfg.text_x, cfg.text_y, cfg.text_color, cfg.text_tolerance);
+
+                    // Debug logging: once per second write what we see
+                    if (g_log) {
+                        static DWORD last_log = 0;
+                        DWORD now = GetTickCount();
+                        if (now - last_log >= 1000) {
+                            last_log = now;
+                            COLORREF pixel = GetPixel(hdc, cfg.text_x, cfg.text_y);
+                            wchar_t title[256]{};
+                            HWND fg = GetForegroundWindow();
+                            GetWindowTextW(fg, title, 256);
+                            std::fprintf(g_log, "[%lu] mode=%d fg=%ls text_px=%06lX text_ok=%d\n",
+                                         now, static_cast<int>(g_mode), title, static_cast<unsigned long>(pixel), text_ok ? 1 : 0);
+                            std::fflush(g_log);
+                        }
+                    }
+
+                    if (text_ok) {
+                        click_at(cfg.text_x, cfg.text_y);
                         // Stop after accepting one match
                         g_enabled = false;
                         g_mode = AutoAcceptMode::Off;
+                        if (g_log) {
+                            std::fprintf(g_log, "[%lu] CLICK at (%d, %d)\n", GetTickCount(), cfg.text_x, cfg.text_y);
+                            std::fflush(g_log);
+                        }
                     }
                 }
             }
@@ -126,6 +142,8 @@ bool autoaccept_init() {
     if (g_running) return true;
     cfg_normal = load_normal();
     cfg_dotaplus = load_dotaplus();
+    if (!g_log)
+        g_log = std::fopen("autoaccept_debug.log", "a");
     g_running = true;
     g_thread = std::thread(autoaccept_loop);
     return true;
@@ -136,6 +154,10 @@ void autoaccept_shutdown() {
     g_enabled = false;
     if (g_thread.joinable())
         g_thread.join();
+    if (g_log) {
+        std::fclose(g_log);
+        g_log = nullptr;
+    }
 }
 
 void autoaccept_set_mode(AutoAcceptMode mode) {
